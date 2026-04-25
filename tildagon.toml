@@ -1,7 +1,7 @@
 [app]
 name = "EMFight"
-category = "Apps"
-wifi_preference = false
+category = "Games"
+wifi_preference = "wifiRequired"
 
 [entry]
 class = "EMFightApp"
@@ -10,5 +10,5 @@ class = "EMFightApp"
 author = "JonTheNiceGuy"
 license = "Unlicense"
 url = "https://github.com/JonTheNiceGuy/tildagon-emfight"
-description = "BLE beacon scanner for EMFight game"
+description = "Badge fight game for EMF Camp — challenge other badge holders!"
 version = "0.0.1"
