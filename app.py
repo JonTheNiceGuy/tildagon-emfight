@@ -16,8 +16,12 @@ try:
 except ImportError:
     _HAS_URANDOM = False
 
+# qr.py lives next to app.py inside whatever apps/<target> directory the
+# deploy script chose. Relative import lets us find it regardless of the
+# package name; the absolute fallback only matters when the module is run
+# outside a package (test harness).
 try:
-    from apps.emfight.qr import encode as qr_encode
+    from .qr import encode as qr_encode
     _HAS_QR = True
 except Exception:
     try:
@@ -34,6 +38,7 @@ _S_SERVER      = "emfight_server"
 
 HEARTBEAT_MS        = 25_000
 POLL_MS             =  2_000
+PAIR_POLL_MS        =  2_500   # while showing the pairing QR, check every 2.5s
 ANIM_MS             =  1_500
 FIGHT_EXPIRY_SECONDS =   300
 
@@ -99,6 +104,7 @@ class EMFightApp(app.App):
         self.pairing_code         = None
         self.pairing_qr           = None
         self.pair_after_register  = False
+        self.last_pair_poll       = 0  # ticks_ms of last /device/stats probe
 
         # Home screen stats (loaded from /device/stats)
         self.home_username  = ""
@@ -181,6 +187,11 @@ class EMFightApp(app.App):
 
             elif self.state == ST_PAIRING_FETCH:
                 await self._do_pairing_fetch()
+
+            elif self.state == ST_PAIRING:
+                if utime.ticks_diff(utime.ticks_ms(), self.last_pair_poll) >= PAIR_POLL_MS:
+                    await self._do_pair_check()
+                    self.last_pair_poll = utime.ticks_ms()
 
             elif self.state == ST_LOADING_STATS:
                 await self._do_load_stats()
@@ -381,10 +392,14 @@ class EMFightApp(app.App):
                 self.fight_id     = d["fight_id"]
                 self.fight_token  = d["fight_token"]
                 self.display_code = d["display_code"]
+                self.qr_matrix = None
                 if _HAS_QR:
-                    self.qr_matrix = qr_encode(
-                        f"{self.server}/f/{self.fight_token}"
-                    )
+                    try:
+                        self.qr_matrix = qr_encode(
+                            f"{self.server}/f/{self.fight_token}"
+                        )
+                    except Exception:
+                        self.qr_matrix = None
                 now = utime.ticks_ms()
                 self.last_hb = self.last_poll = now
                 self.fight_started = now
@@ -589,6 +604,35 @@ class EMFightApp(app.App):
         except Exception:
             self.state = ST_HOME
 
+    async def _do_pair_check(self):
+        """While the pairing QR is on screen, poll /device/stats to see if the
+        user has completed pairing on the web. A 200 means the device is now
+        attached to a user — go back to the home screen with their stats.
+        """
+        try:
+            r = requests.get(
+                f"{self.server}/api/v1/device/stats",
+                headers=self._hdrs(),
+            )
+            status = r.status_code
+            if status == 200:
+                d = r.json(); r.close()
+                self.home_username = d.get("username_display", "")
+                self.home_wins     = d.get("wins", 0)
+                self.home_rank     = d.get("rank") or 0
+                # Clear pairing scratch state so the screen doesn't flash on
+                # the next entry.
+                self.pairing_code = None
+                self.pairing_qr   = None
+                self.state = ST_HOME
+            else:
+                r.close()
+                # Anything else (typically 401/403 = still unpaired) — keep
+                # showing the QR and try again next tick.
+        except Exception:
+            # Network blip — try again on the next tick.
+            pass
+
     async def _do_pairing_fetch(self):
         try:
             r = requests.post(
@@ -600,8 +644,15 @@ class EMFightApp(app.App):
                 self.pairing_code = d["code"]
                 url = d.get("url",
                             f"{self.server}/pair?code={self.pairing_code}")
+                self.pairing_qr = None
                 if _HAS_QR:
-                    self.pairing_qr = qr_encode(url)
+                    try:
+                        self.pairing_qr = qr_encode(url)
+                    except Exception:
+                        # Encoder failure (e.g. URL too long) — fall through
+                        # to text-only pairing screen rather than erroring out.
+                        self.pairing_qr = None
+                self.last_pair_poll = utime.ticks_ms()
                 self.state = ST_PAIRING
             elif r.status_code in (401, 403):
                 r.close()
